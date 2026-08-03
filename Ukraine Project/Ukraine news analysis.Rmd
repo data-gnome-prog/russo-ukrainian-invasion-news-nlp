@@ -1,0 +1,2024 @@
+---
+title: "4 Years of Reporting on the Full Scale Russian Invasion of Ukraine"
+output: html
+---
+
+
+
+```{r loading packages}
+
+#install.packages('guardianapi')
+#install.packages('usethis')
+#install.packages('ggthemes')
+#install.packages('textdata')
+#install.packages('widyr')
+
+# Tidyverse paradigm
+library(dplyr)
+library(tidyverse)
+library(widyr)
+
+
+# API and webscraping
+library(rvest)
+library(httr2)
+library(guardianapi)
+
+
+# Visualizations
+library(ggplot2)
+library(patchwork)
+library(ggthemes)
+library(ggrepel)
+library(RColorBrewer)
+library(scales)
+
+
+# Text analyisis
+library(quanteda)
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(quanteda.textmodels)
+library(textstem)
+library(tidytext)
+library(textdata)
+library(topicmodels)
+
+
+
+```
+
+
+```{r Kyiv Post Web Scraping}
+
+# Initializing the links for scraping
+kp_default_url <- 'https://www.kyivpost.com'
+kp_war_url <- 'https://www.kyivpost.com/topic/war-in-ukraine'
+
+# Function to check if anything is missing and returns missing character if so
+na_if_empty <- function(x) {
+  if (length(x) == 0 || all(x == '') || all(is.na(x))) { # if any kind of 0 or non-character
+    return(NA_character_) # return NA character
+  } else {
+    return(x) 
+  }
+}
+
+
+# Initializing a function that reads the article pages
+read_article_body <- function (kp_article_links) { 
+  kp_dfs <- list() # Initizalizing an empty list
+  for(i in seq_along(kp_article_links)) { # for loop that loops over 
+
+
+    # Closing all connections every 10 pages
+    if (i %% 10 == 0) {
+      closeAllConnections()
+      gc(verbose = FALSE)
+    }
+    print(paste0('Scraping content from article ', i, ' of ', length(kp_article_links))) # Text message to see how far along the scraping is
+    if (is.na(kp_article_links[i])) next # Skips over dead pages
+
+    # Second fail safe - catches errors and returns NULL instead of crashing
+      page_html <- tryCatch({
+  read_html(kp_article_links[i]) 
+}, error = function(e) {
+  closeAllConnections() # Closes broken handle if an article fails
+  return(NULL)
+})
+    if (is.null(page_html)) next # if null - skips over it
+
+    # Parse the content wrappers of each url page 
+    kp_content_wrapper <- page_html %>%
+      html_elements('.content-wrapper')
+    
+
+    # Parse the titles out of the wrapper as text
+    kp_titles <- kp_content_wrapper %>%
+      html_elements('.post-title') %>% 
+      html_text2() %>%
+      na_if_empty()
+
+    # Parse the authors out of the wrapper as text
+    kp_content_authors <- kp_content_wrapper %>% 
+      html_elements('.post-info a') %>%
+      html_text2() %>%
+      na_if_empty()
+
+    # Parse the date out of the wrapper as text - needs more cleaning afterwards
+    kp_content_date_uncleaned <- kp_content_wrapper %>%
+      html_elements('.post-info') %>%
+      html_text2() %>%
+      na_if_empty()
+
+    # Parse the lead text out of the wrapper as text
+    kp_content_lead <- kp_content_wrapper %>%
+      html_elements('.post-lead') %>% 
+      html_text2() %>%
+      na_if_empty()
+
+    # Parse the body text out of the wrapper as text - needs more cleaning afterwards
+    kp_body_text_uncleaned <- kp_content_wrapper %>%
+      html_elements('#post-content p, #post-content li') %>%
+      html_text2() %>%
+      paste(collapse = "\n\n") %>%
+      na_if_empty()
+      
+    # Add everything, including the links, to a tibble 
+    kp_tibble <- tibble(
+    title = kp_titles,
+    lead_text = kp_content_lead,
+    body_text_uncleaned = kp_body_text_uncleaned,
+    date_uncleaned = kp_content_date_uncleaned,
+    authors = kp_content_authors, 
+    link = kp_article_links[i])
+
+    # add them to the empty list
+    kp_dfs[[i]] <- kp_tibble
+
+    # Adding sleep at .5 seconds
+    Sys.sleep(.1)
+
+  }
+
+  # Bind rows together and return them
+  return(bind_rows(kp_dfs))
+
+}
+
+
+
+# Initializing function that reads through the pages of the website itself in the war section
+read_war_page <- function(kp_war_url, max_page)   { 
+
+all_pages_dfs <- list() # initialize empty list to put in all of the pages
+for (p in 1:max_page) { # Looping across all of the pages (max page is automatically parsed)
+  kp_war_page <- paste0(kp_war_url, '?page=', p) # Changing through the pages
+  print(paste0('Processing page number: ', p, ' of ', max_page)) # printing out which page it is currently parsing
+
+
+  # Every 10 pages, close all connections to free memory
+  if (p %% 10 == 0) {
+    closeAllConnections()
+    gc(verbose = FALSE)
+  }
+
+  # Fail safe 
+ kp_html_page_specific <- tryCatch({
+  read_html(kp_war_page)
+}, error = function(e) {
+  closeAllConnections() # Closes broken handle if main page fails
+  return(NULL)
+})
+  if (is.null(kp_html_page_specific)) next
+
+
+
+
+  # Parsing all the elements  under the category latest
+  kp_html_elements <- kp_html_page_specific %>%
+  html_elements('.post-info') %>%
+  na_if_empty()
+
+  # Parsing the links
+  kp_article_links <- kp_html_elements %>%
+  html_elements('h2 > a') %>%
+  html_attr('href', default = NA_character_) %>%
+  url_absolute(kp_default_url) %>%
+  na_if_empty()
+
+# Using the previously initialized function to scrape the articles while going through the pages and adding them to the empty list
+all_pages_dfs[[p]] <- read_article_body(kp_article_links)
+
+Sys.sleep(3) # sleep function of 3 seconds
+}
+return(bind_rows(all_pages_dfs)) # binding the of the list together and returning them
+}
+
+
+# The overarching function that incorporates the previous two functions and caches 
+kp_scraper <- function(cache_file = 'kp_articles.rds', force_refresh = FALSE) { # Caches the file 
+  if (file.exists(cache_file) && !force_refresh) { # Checks if the file exists in cache and not force refreshed
+  file_age <- difftime(Sys.time(), file.mtime(cache_file), 
+  units = 'weeks') # If the file already exists checks how old it is in weeks
+  if (file_age < 4) { # If file age is less than 4 weeks
+    print(paste0('loading cached data - ', round(file_age, 1), 'week(s) old')) # Returns message that it loads the cached file and mentions age in weeks
+    return(readRDS(cache_file)) # Returns the cached file
+  }
+}
+
+# If the file is older than 4 weeks and the function isn't force_refreshed 
+# Automatically checks the max pages
+max_page <- read_html(kp_war_url) %>% 
+  html_element('li.page-item:nth-child(6) > a:nth-child(1)') %>%
+  html_text2() %>%
+  as.integer() # Converts to integer
+
+# Uses the previous two functions to scrape all of the information into an object
+kp_scraped_data <- read_war_page(kp_war_url, max_page)
+
+# Saves the scraped data as cached file .rds
+saveRDS(kp_scraped_data, cache_file)
+print(paste0('Data Succesfully Compiled')) # Message if succesfully compiled
+
+return(kp_scraped_data) # Returning the data
+}
+
+
+
+kp_data <- kp_scraper()
+
+```
+
+```{r Getting Guardian Data with API}
+
+# Checks for cached file and if it exists already, it uses that. Since the file is fixed in time, it doesn't check for age. If file doesn't exist yet, it queries the API for all content on ukraine and war from the start of invasion to exactly 4 years later
+get_guardian_content <- function(cache_file = 'gu_ua_war_content.rds', force_refresh = FALSE) {
+  if (file.exists(cache_file) && !force_refresh) {
+    print('Loading cached data') 
+    return(readRDS(cache_file))  }
+    gu_ua_war_content <- gu_content(query = 'ukraine AND war',
+                                from_date = '2022-02-24',
+                                to_date = '2026-07-28')
+saveRDS(gu_ua_war_content, cache_file)
+  gu_ua_war_content
+}
+
+# Querying ukraine AND war for all the news with ukraine and war in id
+gu_ua_war_content <- get_guardian_content()
+
+
+
+# Both last scraped the 28th of July 2026
+
+```
+
+
+```{r Kyiv Post Preprocessing and Cleaning}
+
+
+# Kyiv Post preprocessing and minimal cleaning of body text
+kp_articles <- kp_data %>%
+  filter(str_detect(link, '/post/\\d+')) %>%
+  mutate(
+    pub_date_raw = str_extract(date_uncleaned, '\\b[A-Z][a-z]{2,}\\.? \\d{1,2}, \\d{4}\\b' # Checks for the date in Kyiv Post format 'July 20, 2023'
+), 
+    pub_date = mdy(pub_date_raw),  # lubridate function that turns the m-d-year character format into a date format
+    pub_month = floor_date(pub_date, 'month'), # extracts the floor date per month
+    pub_year = as.integer(year(pub_date)), # extracts the year
+    month_of_year = month(pub_date, label = T), # extractws the month, without any other information
+    years_passed = as.integer(floor(time_length(interval(as.Date('2022-02-23'), pub_date), 'years'))), # calculates years passed
+    war_year = paste0('Year of war: ',years_passed + 1), # creates a 'years of war' variable that measures the years the war is ongoing based on the date of publication via years_passed
+) %>%
+  mutate(body_text = str_replace_all(body_text_uncleaned, '\\R+', ' '), # basic cleaning of body text by removing all unneccesary html labels
+        body_text = str_replace_all(body_text, regex('JOIN US ON TELEGRAM\\s*Follow our coverage of the war on the @\\w+', ignore_case = T), ' '), # remove standard hidden socials KP
+        body_text = str_replace_all(body_text, regex('\\badvertisement\\b', ignore_case = T), ' '), # remove standard hidden advertisement
+        body_text = str_replace_all(body_text, regex('other topics of interest', ignore_case = T), ' '), # remove the other topics of interest tag
+        body_text = str_replace_all(body_text, regex('Follow our coverage of the war on the @Kyivpost_official.', ignore_case = T), ' '), # remove the follow our coverage
+        body_text = str_replace_all(body_text, pattern = regex('zelensky', ignore_case = T), replacement = 'zelenskyy'),
+        title = str_replace_all(title, pattern = regex('zelensky', ignore_case = T), replacement = 'zelenskyy'), # Equalizing the spelling of zelensky to make comparison possible - universal accepted English spelling 
+        body_text = str_squish(body_text)
+  ) %>% 
+  filter(pub_date >= '2022-06-05', body_text != 'NA', body_text != '', !is.na(body_text)) %>% # Earliest date of news KP after the takeover - important caveat
+  add_count(pub_date, name = 'articles_daily') %>%
+  add_count(pub_month, name = 'articles_monthly') %>%
+  add_count(pub_year, name = 'articles_yearly') %>%
+  add_count(war_year, name = 'articles_war_year') %>%
+  rowid_to_column(var = 'id') %>%
+  arrange(id)
+
+
+kp_articles
+
+kp_data$body_text_uncleaned[1]
+kp_articles$body_text[2]
+
+
+```
+
+[![Support Ukraine Badge](https://bit.ly/support-ukraine-now)](https://github.com/support-ukraine/support-ukraine)
+
+
+Mention here that the initial plan was to scrape the Kyiv independent - but that specific war content was only available on the war page, which was a javascript page with no page tags. Instead, I tried to use chromote within Rvest to mimick chrome devtools within a live html read of the war page to then click thousands of times on the load more button. However, after careful consideration this was seen as too cumbersome and prone to crash. A different approach was to look at the xml website page, which had an overview of every link to the posts. The problem was that there was no way to filter for only articles about war here.
+
+
+
+
+Why Ukraine and war? Because Kyiv independent is the main source and they have a dedicated news section for the war, which we use as the benchmark.
+
+
+```{r Basic exploration of the Guardian Database Structure}
+
+# Check if it starts at starting date 
+gu_ua_war_content %>%
+  arrange(web_publication_date)
+
+# Which types to use? - articles
+unique(gu_ua_war_content$type)
+
+# Which sections we take into account?
+unique(gu_ua_war_content$section_id)
+
+gu_ua_war_content %>%
+  filter(section_id == 'world')
+
+gu_ua_war_content %>%
+  filter(section_id == 'us-news')
+
+gu_ua_war_content %>%
+  filter(section_id == 'business')
+
+gu_ua_war_content %>%
+  filter(section_id == 'uk-news')
+
+gu_ua_war_content %>%
+  filter(section_id == 'books') 
+
+# A lot of the sections are only tangentially related to the russo-ukrainian war. for that reason we decided only to take into account the 'world' section, which is most in line with the war section of the kyiv independent 
+
+gu_articles_raw <- gu_ua_war_content %>%
+  filter(section_id == 'world') %>%
+  filter(type == 'article')
+
+
+
+```
+
+
+```{r The Guardian Preprocessing and Cleaning}
+
+# Adding dates for days, months, and years. Adding article counts per day, month, and year
+gu_articles_full <- gu_articles_raw %>%
+  mutate(pub_date = as.Date(web_publication_date),
+         pub_month = floor_date(pub_date, 'month'),
+         pub_year = year(pub_date),
+         month_of_year = month(pub_date, label = T),
+         years_passed = as.integer(floor(time_length(interval(as.Date('2022-02-23'), pub_date), 'years'))), # Creates a years_passed variable that measures the floor of the years past as an interval between the start of the war and the publication date
+         war_year = paste0('Year of war: ',years_passed + 1)) %>% # creates a 'years of war' variable that measures the years the war is ongoing based on the date of publication via years_passed
+  mutate(body_text = str_replace_all(body_text, pattern = regex('zelenskiy', ignore_case = T), replacement = 'zelenskyy'),
+        headline = str_replace_all(headline, pattern = regex('zelenskiy', ignore_case = T), replacement = 'zelenskyy')) %>%
+          filter(body_text != 'NA', body_text != '', !is.na(body_text)) %>%
+  add_count(pub_date, name = 'articles_daily') %>%
+  add_count(pub_month, name = 'articles_monthly') %>%
+  add_count(pub_year, name = 'articles_yearly') %>%
+  add_count(war_year, name = 'articles_war_year') %>%
+  rename(old_id = 'id') %>%
+  rowid_to_column(var = 'id') %>%
+  arrange(id)
+
+
+
+gu_articles <- gu_articles_full %>%
+  filter(pub_date >= '2022-06-05')
+
+
+
+
+```
+
+```{r Basic Descriptives of Corpi - KP and the Guardian}
+
+
+
+kp_body_descriptives <- kp_articles %>%
+  mutate(words_per_article = str_count(body_text, pattern = '\\w+')) %>%
+  summarize(median = median(words_per_article), average = mean(words_per_article), std = sd(words_per_article), minimum = min(words_per_article), maximum = max(words_per_article), na.rm = T)
+
+kp_body_descriptives
+
+
+gu_body_descriptives <- gu_articles %>%
+  mutate(words_per_article = str_count(body_text, pattern = '\\w+')) %>%
+  summarize(median = median(words_per_article), average = mean(words_per_article), std = sd(words_per_article), minimum = min(words_per_article), maximum = max(words_per_article), na.rm = T)
+
+gu_body_descriptives
+
+# From this we can see why there are more tokens in The Guardians corpus despite having fewer articles. The average word count per article is much higher, while the Kyiv Post has a lot more short form articles. However, we also notice that there are a lot of articles with low word count. 
+
+kp_low_word_count <- kp_articles %>%
+  mutate(words_per_article = str_count(body_text, pattern = '\\w+')) %>%
+  filter(words_per_article < 50)
+kp_low_word_count
+
+# From this we garner that all of these are listacles that are not written by the Kyiv Post itself, and rather are taken from the ISW Russian Offensive Campaign Assessment or the British Defence Intelligence. These are not written by any authors of the Kyiv Post itself and are thus taken out of the analysis. 
+
+
+kp_articles <- kp_articles %>%
+  filter(
+    !str_detect(title, regex('^ISW Russian Offensive Campaign Assessment.*', ignore_case = T)),
+    !str_detect(title, regex('^British Defence Intelligence.*', ignore_case = T)),
+    !str_detect(authors, regex('^ISW', ignore_case = T))
+  )
+
+
+# However, we're likely missing more list articles than just these ones. These are taken care of in subsequent runs of scraping by adjusting the scraper. 
+
+```
+
+
+```{r Kyiv Post hashtag analysis Body Text}
+
+# Are hash-tags meaningful to Kyiv Post war reporting? 
+kp_hashtags <- kp_articles %>%
+  mutate(
+    count_tags = str_count(body_text, '#\\w+'), # regex detects hashtags in the body text
+    hash_tags = str_extract_all(body_text, '#\\w+'),
+    ) %>%
+  select(body_text, count_tags, hash_tags) %>%
+  arrange(desc(count_tags))
+
+kp_hashtags %>%
+  filter(count_tags > 0)
+
+# 430 articles of 12000+ contain hashtags - which is a meaningful amount
+
+
+kp_hashtags_content <- unnest(kp_hashtags, cols = c(hash_tags), keep_empty = F)
+
+kp_hashtags_content
+
+
+```
+
+
+
+```{r Guardian Hashtag Analysis Body Text}
+
+
+# Are hash-tags meaningful to the Guardian war reporting? 
+gu_hashtags <- gu_articles %>%
+  mutate(
+    count_tags = str_count(body_text, '#\\w+'), # regex detects hashtags in the body text
+    hash_tags = str_extract_all(body_text, '#\\w+'),
+    ) %>%
+  select(body_text, count_tags, hash_tags)
+
+
+# Unnesting the lists to see which hash-tags are used and if they're useful. For this analysis, hash-tags seem not very that relevant, but some words seem 
+gu_hashtags_content <- unnest(gu_hashtags, cols = c(hash_tags), keep_empty = T)
+
+# Hashtags ordered by count
+gu_hash_count <- gu_hashtags_content %>%
+  filter(hash_tags != 'NA') %>%
+  count(hash_tags) %>%
+  arrange(desc(n)) 
+
+gu_hash_count
+
+# From here we can see that most hashtags are used sparingly in the body text, therefore, the removal of hashtags will do no harm to the analysis. 
+
+
+# Because of that we decided that we remove all hashtags with words attached to them, because hashtags like #block only contaminate the findings, and we're interested in the content of the article. Hashtags like #Ukraine and #Russia are so underrepresented and are expected to be words that show up in our further analysis - in the content of the article - anyway, that we also delete them 
+
+
+
+```
+
+
+
+
+```{r Creating War Anniversaries Tibble for Annotations}
+
+# Creating Events tibble 
+war_anniversaries <- tribble(
+  ~date, ~label,
+  '2023-02-24', 'End of First Year of War',
+  '2024-02-24', 'End of Second Year of War',
+  '2025-02-24', 'End of Third Year of War',
+  '2026-02-24', 'End of Fourth Year of War', 
+) %>%
+  mutate(date = as.Date(date))
+
+
+# Approximating the y height on the graph for annotations - The Guardian 
+gu_y_height <- approx(x = gu_articles_full$pub_month, 
+                       y = gu_articles_full$articles_monthly, 
+                       xout = war_anniversaries$date)$y
+
+# Adding the y height to the war_anniversaries tribble for proper annotation on graph - The Guardian
+gu_war_anniversaries <- war_anniversaries %>% 
+  mutate(y_on_line = gu_y_height)
+
+
+
+# Approximating the y height on graph for annotations - KP
+kp_y_height <- approx(x = kp_articles$pub_month, 
+                       y = kp_articles$articles_monthly, 
+                       xout = war_anniversaries$date)$y
+
+# Adding the y height to the war_anniversaries tribble for proper annotation on graph - KP
+kp_war_anniversaries <- war_anniversaries %>% 
+  mutate(y_on_line = kp_y_height)
+
+
+```
+
+
+
+```{r Guardian Exploratory Visualizations - Number of Articles}
+
+# Exploratory Visualization - Monthly Articles Total Timeline 
+gu_articles_plot_total <- ggplot(gu_articles_full, aes(x = pub_month, y = articles_monthly)) + 
+  geom_line(color = '#FAF9F6', linewidth = .6, show.legend = FALSE) + 
+  geom_vline(data = gu_war_anniversaries, 
+            aes(xintercept = date),         
+            color = '#FAF9F6',           
+            size = .5,
+            linetype = 5) +
+  geom_text(data = gu_war_anniversaries, 
+             aes(x = date, y = y_on_line, label = label), , 
+             size = 4, 
+             color = '#FAF9F6',
+             nudge_x = -25,
+             nudge_y = 400,
+             angle = 90) +
+  geom_point(data = gu_war_anniversaries, 
+             aes(x = date, y = y_on_line), 
+             color = '#FFD700', size = 1.5) +
+  labs(title = 'The Guardian: Amount of Articles per Month',
+       x = 'Months', 
+       y = 'Articles Count', 
+       caption = 'Data from theguardian.com') +
+  scale_x_date(date_breaks = '1 month', # Breaks every 2 months
+               date_labels = '%b-%Y', # month abbreviated - year format 
+               limits = c(as.Date('2022-02-01'), as.Date('2026-08-01')), 
+               expand = c(0,0)) + # Removes dead space
+  scale_y_continuous(breaks = seq(0, 700, 50),
+                     limits = c(0,700)) +
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+        axis.text.y = element_text(size = 6, color = '#FAF9F6'),
+         panel.background = element_rect(fill = '#0057B7'),
+         plot.background = element_rect(fill = '#0057B7'),
+         plot.title = element_text(color = '#FAF9F6'),
+         axis.title = element_text(color = '#FAF9F6'),
+         axis.line = element_line(color = '#FAF9F6'),
+         axis.ticks = element_line(color = '#FAF9F6'),
+         plot.caption = element_text(color = '#FAF9F6'))
+
+
+
+
+# Clearer view is by segmenting the years into one graph and giving each year a different color
+
+gu_articles_plot_year <- ggplot(gu_articles_full, aes(x = month_of_year, y = articles_monthly, group = as.factor(pub_year), color = as.factor(pub_year))) + 
+  geom_line(linewidth = .8, show.legend = T) + 
+  labs(title = 'The Guardian: Amount of Articles per Month',
+       x = 'Months', 
+       y = 'Articles Count', 
+       caption = 'Data from theguardian.com') +
+  scale_y_continuous(breaks = seq(0, 700, 50),
+                     limits = c(0,700)) +
+  theme_excel_new() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+        axis.text.y = element_text(size = 6, color = '#FAF9F6'),
+         panel.background = element_rect(fill = '#0057B7'),
+         plot.background = element_rect(fill = '#0057B7'),
+         plot.title = element_text(color = '#FAF9F6'),
+         axis.title = element_text(color = '#FAF9F6'),
+         axis.line = element_line(color = '#FAF9F6'),
+         axis.ticks = element_line(color = '#FAF9F6'),
+         plot.caption = element_text(color = '#FAF9F6'),
+         legend.background = element_rect(fill = '#0057B7'),
+         legend.text = element_text(color = '#FAF9F6'))
+
+
+
+```
+
+```{r KP Exploratory Visualizations - Number of Articles}
+
+# Exploratory Visualization - Monthly Articles Total Timeline 
+kp_articles_plot_total <- ggplot(kp_articles, aes(x = pub_month, y = articles_monthly)) + 
+  geom_line(color = '#FAF9F6', linewidth = .6, show.legend = FALSE) + 
+  geom_vline(data = kp_war_anniversaries, 
+            aes(xintercept = date),         
+            color = '#FAF9F6',           
+            size = .5,
+            linetype = 5) +
+  geom_text(data = kp_war_anniversaries, 
+             aes(x = date, y = y_on_line, label = label), , 
+             size = 4, 
+             color = '#FAF9F6',
+             nudge_x = -25,
+             nudge_y = 200,
+             angle = 90) +
+  geom_point(data = kp_war_anniversaries, 
+             aes(x = date, y = y_on_line), 
+             color = '#FFD700', size = 1.5) +
+  labs(title = 'Kyiv Post: Amount of Articles per Month',
+       x = 'Months', 
+       y = 'Articles Count', 
+       caption = 'Data from Kyivpost.com') +
+  scale_x_date(date_breaks = '1 month', # Breaks every 2 months
+               date_labels = '%b-%Y', # month abbreviated - year format 
+               limits = c(as.Date('2022-02-01'), as.Date('2026-08-01')), 
+               expand = c(0,0)) + # Removes dead space
+  scale_y_continuous(breaks = seq(0, 700, 50),
+                     limits = c(0,700)) +
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+        axis.text.y = element_text(size = 6, color = '#FAF9F6'),
+         panel.background = element_rect(fill = '#0057B7'),
+         plot.background = element_rect(fill = '#0057B7'),
+         plot.title = element_text(color = '#FAF9F6'),
+         axis.title = element_text(color = '#FAF9F6'),
+         axis.line = element_line(color = '#FAF9F6'),
+         axis.ticks = element_line(color = '#FAF9F6'),
+         plot.caption = element_text(color = '#FAF9F6'))
+
+
+
+
+# Clearer view is by segmenting the years into one graph and giving each year a different color
+
+kp_articles_plot_year <- ggplot(kp_articles, aes(x = month_of_year, y = articles_monthly, group = as.factor(pub_year), color = as.factor(pub_year))) + 
+  geom_line(linewidth = .8, show.legend = T) + 
+  labs(title = 'Kyiv Post: Amount of Articles per Month',
+       x = 'Months', 
+       y = 'Articles Count', 
+       caption = 'Data from kyivpost.com') +
+  scale_y_continuous(breaks = seq(0, 700, 50),
+                     limits = c(0,700)) +
+  theme_excel_new() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+        axis.text.y = element_text(size = 6, color = '#FAF9F6'),
+         panel.background = element_rect(fill = '#0057B7'),
+         plot.background = element_rect(fill = '#0057B7'),
+         plot.title = element_text(color = '#FAF9F6'),
+         axis.title = element_text(color = '#FAF9F6'),
+         axis.line = element_line(color = '#FAF9F6'),
+         axis.ticks = element_line(color = '#FAF9F6'),
+         plot.caption = element_text(color = '#FAF9F6'),
+         legend.background = element_rect(fill = '#0057B7'),
+         legend.text = element_text(color = '#FAF9F6'))
+
+
+```
+
+```{r KP and Guardian comparison of # articles}
+
+kp_articles_plot_total/gu_articles_plot_total
+
+kp_articles_plot_year/gu_articles_plot_year
+
+```
+
+
+
+
+
+```{r The Guardian and Kyiv Post Tidytext tokenization}
+
+# Stopwords used 
+head(stop_words)
+
+
+
+# For comparison between words, we use the corpi of the Guardian and Kyiv Post that starts on the fifth of June, considering it is the first post that is available on the Kyiv Post website after the restructure. 
+
+# Unnesting words as tokens from body_text - The Guardian
+gu_body_tokens_raw <- gu_articles %>%
+  unnest_tokens(word, body_text) %>% # default is words
+  anti_join(stop_words) # anti-join that removes standard stopwords (tidytext package)
+
+# Unnesting words as tokens from headline - The Guardian
+gu_headline_tokens_raw <- gu_articles  %>%
+  mutate(
+    headline = str_remove(headline, regex("War briefing:?\\s*", ignore_case = TRUE)) # Removes "War briefing" (and any trailing colon/spaces) only at the start of a headline 
+  ) %>%
+  unnest_tokens(word, headline) %>%
+  anti_join(stop_words) 
+
+
+kp_body_tokens_raw <- kp_articles %>%
+  unnest_tokens(word, body_text) %>%
+  anti_join(stop_words)
+
+kp_title_tokens_raw <- kp_articles %>%
+  unnest_tokens(word, title) %>%
+  anti_join(stop_words)
+
+kp_lead_tokens_raw <- kp_articles %>%
+  unnest_tokens(word, lead_text) %>%
+  anti_join(stop_words)
+
+
+
+```
+
+
+
+```{r The Guardian and KP lemmatization}
+
+
+kp_body_tokens <- kp_body_tokens_raw %>% 
+  mutate(word = lemmatize_words(word)) 
+
+
+kp_title_tokens <- kp_title_tokens_raw %>% 
+  mutate(word = lemmatize_words(word))
+
+
+
+
+gu_body_tokens <- gu_body_tokens_raw %>% 
+  mutate(word = lemmatize_words(word))
+
+gu_headline_tokens <- gu_headline_tokens_raw %>% 
+  mutate(word = lemmatize_words(word))
+
+
+```
+
+
+
+```{r The Guardian Tokens Frequencies Visualizations}
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words across all years
+gu_body_tokens_viz <- gu_body_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'The Guardian Body Text Top 10 Words Across All Years', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    theme(
+    # Turn the entire background blue
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words faceted by year of war
+gu_body_tokens_viz_yearly <- gu_body_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'The Guardian Body Text Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words across all years
+gu_headline_tokens_viz <- gu_headline_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'The Guardian Headline Top 10 Words', x = 'Count', y = 'Word') +
+    scale_x_continuous(breaks = seq(0,4000, 500)) +
+    theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+# Possibly remove briefing from headlines because it doesn't really match here. However. It doesn't matter that much 
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words faceted by year of war
+gu_headline_tokens_viz_yearly <- gu_headline_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'The Guardian Headlines Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(breaks = seq(0, 1500, 500), limits = c(0, 1500)) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+# Left briefing in even though it is a title, because it tells us something about the populatiry of the category of such articles and its popularity over the years. 
+
+```
+
+
+```{r Kyiv Post Tokens Frequencies Visualizations}
+
+# Kyiv Post Tokens Body Text Frequencies visualizations - top 10 words across all years
+kp_body_tokens_viz <- kp_body_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'Kyiv Post Body Text Top 10 Words Across All Years', 
+    x = 'Count', 
+    y = 'Word'
+    ) +
+    theme_excel_new() +
+    theme(
+    # Turn the entire background blue
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+
+
+# Kyiv Post Tokens Body Text Frequencies visualizations - top 10 words faceted by year of war
+kp_body_tokens_viz_yearly <- kp_body_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'Kyiv Post Body Text Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+
+# Kyiv Post Tokens Headline Text Frequencies visualizations - top 10 words across all years
+kp_title_tokens_viz <- kp_title_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'Kyiv Post Headline Top 10 Words', x = 'Count', y = 'Word') +
+    scale_x_continuous(breaks = seq(0,4000, 500)) +
+    theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+
+
+# Kyiv Post Tokens Headline Text Frequencies visualizations - top 10 words faceted by year of war
+kp_title_tokens_viz_yearly <- kp_title_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'Kyiv Post Headlines Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(breaks = seq(0, 1500, 500), limits = c(0, 1500)) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+```
+
+```{r KP and The Guardian Word Frequencies Comparisons}
+
+# comparison between total body token frequencies 
+kp_body_tokens_viz/gu_body_tokens_viz
+
+# comparison between yearly body token frequencies
+kp_body_tokens_viz_yearly/gu_body_tokens_viz_yearly
+
+# comparison between total headline token frequencies
+kp_title_tokens_viz/gu_headline_tokens_viz
+
+# comparison between yearly headline token frequencies
+kp_title_tokens_viz_yearly/gu_headline_tokens_viz_yearly
+
+```
+
+
+```{r Frequency comparisons - Kyiv Post and The Guardian}
+
+frequency_body <- bind_rows(
+  kp_body_tokens %>% mutate(journal = 'kyiv_post'),
+  gu_body_tokens %>% mutate(journal = 'the_guardian')) %>% # -id is to avoid conflict between ids because of class mismatch 
+  mutate(word = str_extract(word, "[a-z']+")) %>% # only words, because numbers would be too unique
+  count(journal, word) %>%
+  group_by(journal) %>%
+  mutate(proportion = n/sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = journal, values_from = proportion) 
+
+
+
+frequency_body %>%
+  ggplot(aes(x = kyiv_post, y = the_guardian, color = kyiv_post - the_guardian)) +
+  geom_abline(color = '#FAF9F6', linetype = 2) +
+  geom_jitter(alpha = .1, size = 2.5, width = .3, height = .3, show.legend = F) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5, show.legend = F) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient2(
+    low = '#FF8C00',      # Color for words predominant in The Guardian (negative)
+    mid = '#FAF9F6',      # Neutral color for words on the diagonal line (zero difference)
+    high = '#FFD700',     # Color for words predominant in Kyiv Post (positive)
+    midpoint = 0,
+    limits = c(-0.0005, 0.0005),
+    oob = scales::squish # Prevents points outside limits from turning gray/invisible
+  ) +
+  labs(title = 'Body Text Comparison', y = 'The Guardian', x = 'The Kyiv Post') +
+  theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'),
+    legend.position = 'none'
+    ) 
+
+cor.test(frequency_body$kyiv_post, frequency_body$the_guardian)
+cor.test(frequency_body$kyiv_post, frequency_body$the_guardian, method = 'spearman') # spearman test for robustness
+
+
+
+
+
+
+frequency_headline <- bind_rows(
+  kp_title_tokens  %>% mutate(journal = 'kyiv_post'),
+  gu_headline_tokens  %>% mutate(journal = 'the_guardian')) %>% # -id is to avoid conflict between ids because of class mismatch 
+  mutate(word = str_extract(word, "[a-z']+")) %>% # only words, because numbers would be too unique
+  count(journal, word) %>%
+  group_by(journal) %>%
+  mutate(proportion = n/sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = journal, values_from = proportion) 
+
+
+
+frequency_headline %>%
+  ggplot(aes(x = kyiv_post, y = the_guardian, color = kyiv_post - the_guardian)) +
+  geom_abline(color = '#FAF9F6', linetype = 2) +
+  geom_jitter(alpha = .1, size = 2.5, width = .3, height = .3, show.legend = F) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5, show.legend = F) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient2(
+    low = '#FF8C00',      # Color for words predominant in The Guardian (negative)
+    mid = '#FAF9F6',      # Neutral color for words on the diagonal line (zero difference)
+    high = '#FFD700',     # Color for words predominant in Kyiv Post (positive)
+    midpoint = 0,
+    limits = c(-0.0005, 0.0005),
+    oob = scales::squish # Prevents points outside limits from turning gray/invisible
+  ) +
+  labs(title = 'Headline Comparison', y = 'The Guardian', x = 'The Kyiv Post') +
+  theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'),
+    legend.position = 'none'
+    ) 
+
+
+cor.test(frequency_headline$kyiv_post, frequency_headline$the_guardian)
+cor.test(frequency_headline$kyiv_post, frequency_headline$the_guardian, method = 'spearman')
+
+
+
+```
+
+
+
+The words that show up the most in the headlines are expected - Ukraine, Russia, Zelenskyy, Putin, war. But there are some key takeaways here. In year 1 and 2 of the war, invasion is a key word in the vernacular of the Guardian, while in year 3 and 4 invasion doesn't get used as much anymore. This indicates the change in the narrative of the war, from invasion to full scale warfare. Interestingly, Trump shows up in year 3, 4, and 5 as a top 10 word, when he got re-elected as president of the US. Biden, on the other end, didn't make the cut of top 10 words. 
+
+The body texts sees similar results when it comes to words like Ukraine, Russia, Zelenskyy, Putin, and war, and the rise of Trump's name overtime. However, invasion doesn't get mentioned as much, relative to the headlines. Words like forces, military, and people are more common in the body text, which highlights the key actors of the war on the ground. 
+
+
+
+Lemmatization - vital for this analysis because of the different forms of words that are used in war reporting. With lemmatization, we keep adjectives like ukrainian and nouns like ukraine separately, which can mean different things in the context of war reporting
+
+Tf-idf weighting is used 
+
+Zelenskyy and Zelenskiy are uniformly replaced by the spelling Zelenskyy.  
+
+
+US and us? - US is the country, us is the pronoun. In the context of war reporting, both can be relevant. For that reason, we keep them both and don't replace us with US or vice versa -- we need to do this later 
+
+bigrams make sense here to check for ukrainian, russian etc. same with trigrams for body text 
+
+
+```{r The Guardian bigrams}
+
+gu_body_bigrams <- gu_articles %>%
+  unnest_tokens(bigram, body_text, token = 'ngrams', n = 2) %>%
+  filter(!is.na(bigram)) # filter out all missings
+
+gu_body_bigrams %>%
+  count(bigram, sort = T)
+
+
+# Bigrams have an obvious amount of stopwords. Let's study that more closely
+gu_body_bigrams_sep <- gu_body_bigrams %>%
+  separate(bigram, c('word1', 'word2'), sep = ' ')
+
+gu_body_bigrams_filtered <- gu_body_bigrams_sep %>%
+  filter(
+    !word1 %in% stop_words$word,
+    !word2 %in% stop_words$word
+    )
+
+gu_body_bigrams_count <- gu_body_bigrams_filtered %>%
+  count(word1, word2, sort = T)
+
+gu_body_bigrams_count
+
+gu_body_bigrams_united <- gu_body_bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = ' ')
+
+
+
+# Headline bigrams 
+gu_headlines_bigrams_filtered <- gu_articles %>%
+  unnest_tokens(bigram, headline, token = 'ngrams', n = 2) %>%
+  filter(!is.na(bigram)) %>% # filter out all missings
+  separate(bigram, c('word1', 'word2'), sep = ' ') %>%
+  filter(
+    !word1 %in% stop_words$word,
+    !word2 %in% stop_words$word
+    )
+
+
+gu_headlines_bigram_count <- gu_headlines_bigrams_filtered %>%
+  count(word1, word2, sort = T)
+
+gu_headlines_bigram_count
+
+
+gu_headlines_bigrams_united <- gu_headlines_bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = ' ')
+
+
+
+
+```
+
+```{r Kyiv Post bigrams}
+
+kp_body_bigrams <- kp_articles %>%
+  unnest_tokens(bigram, body_text, token = 'ngrams', n = 2) %>%
+  filter(!is.na(bigram)) # filter out all missings
+
+kp_body_bigrams %>%
+  count(bigram, sort = T)
+
+
+# Bigrams have an obvious amount of stopwords. Let's study that more closely
+kp_body_bigrams_sep <- kp_body_bigrams %>%
+  separate(bigram, c('word1', 'word2'), sep = ' ')
+
+kp_body_bigrams_filtered <- kp_body_bigrams_sep %>%
+  filter(
+    !word1 %in% stop_words$word,
+    !word2 %in% stop_words$word
+    )
+
+kp_body_bigrams_count <- kp_body_bigrams_filtered %>%
+  count(word1, word2, sort = T)
+
+kp_body_bigrams_count
+
+kp_body_bigrams_united <- kp_body_bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = ' ')
+
+
+
+# Title bigrams 
+kp_titles_bigrams_filtered <- kp_articles %>%
+  unnest_tokens(bigram, title, token = 'ngrams', n = 2) %>%
+  filter(!is.na(bigram)) %>% # filter out all missings
+  separate(bigram, c('word1', 'word2'), sep = ' ') %>%
+  filter(
+    !word1 %in% stop_words$word,
+    !word2 %in% stop_words$word
+    )
+
+kp_titles_bigram_count <- kp_titles_bigrams_filtered %>%
+  count(word1, word2, sort = T)
+
+kp_titles_bigram_count
+
+
+kp_titles_bigrams_united <- kp_titles_bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = ' ')
+
+
+
+
+```
+
+
+```{r Body Bigrams Sentiment Contribution - The Guardian VS Kyiv Post}
+
+
+gu_negation_words <- gu_body_bigrams_sep %>%
+  filter(word1 %in% c('no', 'never', 'nor', 'not', 'without')) %>%
+  inner_join(sentiments, by = c(word2 = 'word')) %>%
+  count(word1, word2, sentiment, sort = T)
+
+kp_negation_words <- kp_body_bigrams_sep %>%
+  filter(word1 %in% c('no', 'never', 'nor', 'not', 'without')) %>%
+  inner_join(sentiments, by = c(word2 = 'word')) %>%
+  count(word1, word2, sentiment, sort = T)
+
+
+
+negation_combined <- bind_rows(
+  gu_body_bigrams_sep %>% mutate(journal = 'kyiv_post'),
+  kp_body_bigrams_sep %>% mutate(journal = 'the_guardian')) %>% 
+  mutate(word1 = str_extract(word1, "[a-z']+"),
+        (word2 = str_extract(word1, "[a-z']+")
+        )) %>% 
+          filter(word1 %in% c('no', 'never', 'nor', 'not', 'without')) %>%
+          inner_join(sentiments, by = c(word2 = 'word')) %>%
+          count(journal, word1, word2, sentiment, sort= T)
+
+negation_combined
+
+
+
+# A complex combined comparison graph of negation bigrams
+negation_combined %>%
+  mutate(sentiment = ifelse(sentiment == 'positive', 1, -1)) %>%
+  mutate(contribution = n * sentiment) %>%
+   mutate(
+    fill_group = paste(
+      ifelse(journal == 'kyiv_post', 'kyiv_post', 'the_guardian'),
+      ifelse(contribution > 0, 'positive', 'negative'),
+      sep = ' - '
+    )) %>%
+  arrange(desc(abs(contribution))) %>%
+  group_by(word1, journal) %>%
+  slice_max(order_by = abs(contribution), n = 10, with_ties = F) %>%
+  ungroup() %>%
+  ggplot(aes(x = contribution, y = reorder_within(word2, contribution, word1), fill = fill_group, group = journal)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, show.legend = FALSE) +
+  geom_vline(xintercept = 0, linetype = 3, linewidth = .6, color = '#FAF9F6') +
+  scale_fill_manual(
+    values = c('kyiv_post - positive' = '#FFD700', 'kyiv_post - negative' = '#f75f2c', 
+    'the_guardian - positive' = '#5089fb', 'the_guardian - negative' = '#8b0bfb') 
+  ) +
+  facet_wrap( ~ word1, scales = 'free') +
+  labs(x = 'Contribution: Sentiment value * number of occurrences',
+       y = 'Words preceded by a negation',
+       title = 'Top 10 Words in Sentiment Contribution Preceded by Negation Words Compared') +
+        scale_y_reordered() +
+         theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+  
+
+
+
+
+```
+
+Checking for negatives - a more comprehensive look at words preceded by 'not'
+
+
+
+
+
+```{r  Sentiment Analysis}
+
+# This sentiment analysis takes into account negation words if they're in the first part of the bigram 
+
+
+gu_body_sentiment <- gu_body_bigrams_sep %>%
+  inner_join(sentiments, by = c('word2' = 'word')) %>%
+  mutate(raw_score = ifelse(sentiment == 'positive', 1, -1)) %>%
+  mutate(adjusted_score= ifelse(word1 %in% c('never', 'no', 'nor', 'not', 'without'), -1 * raw_score, raw_score)) %>%
+  mutate(adjusted_sentiment = ifelse(adjusted_score == 1, 'positive', 'negative')) %>%
+  count(war_year, pub_date, pub_year, pub_month, adjusted_sentiment) %>%
+  pivot_wider(names_from = adjusted_sentiment, values_from = n, values_fill = 0) %>%
+  mutate(net_sentiment = positive - negative,
+  total_sentiment = positive + negative, # total mentions
+  ratio_sentiment = net_sentiment / total_sentiment) # density 
+  
+
+
+kp_body_sentiment <- kp_body_bigrams_sep %>%
+  inner_join(sentiments, by = c('word2' = 'word')) %>%
+  mutate(raw_score = ifelse(sentiment == 'positive', 1, -1)) %>%
+  mutate(adjusted_score= ifelse(word1 %in% c('never', 'no', 'nor', 'not', 'without'), -1 * raw_score, raw_score)) %>%
+  mutate(adjusted_sentiment = ifelse(adjusted_score == 1, 'positive', 'negative')) %>%
+  count(war_year, pub_date, pub_year, pub_month, adjusted_sentiment) %>%
+  pivot_wider(names_from = adjusted_sentiment, values_from = n, values_fill = 0) %>%
+  mutate(net_sentiment = positive - negative,
+  total_sentiment = positive + negative, # total mentions
+  ratio_sentiment = net_sentiment / total_sentiment) # density 
+  
+
+
+
+gu_body_sentiment_viz <- ggplot(gu_body_sentiment, aes(x = pub_date, y = ratio_sentiment, fill = as.factor(war_year))) +
+  geom_col(show.legend = F) +
+  geom_smooth(show.legend = F, color = '#FAF9F6') +
+  facet_wrap(~war_year, scales ='free_x') +
+  labs(title = 'The Guardian Body Text Sentiment Negations - by Year of War', x = 'Day of Publication', y = 'Sentiment') +
+    scale_x_date(date_breaks = '2 months', # Breaks every 2 months
+               date_labels = '%b', # month abbreviated   
+               expand = c(0,0)) +
+    theme_excel_new() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6', size = 12),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) +
+    scale_fill_viridis_d(option = 'turbo')
+
+
+
+kp_body_sentiment_viz <- ggplot(kp_body_sentiment, aes(x = pub_date, y = ratio_sentiment, fill = as.factor(war_year))) +
+  geom_col(show.legend = F) +
+  geom_smooth(show.legend = F, color = '#FAF9F6') +
+  facet_wrap(~war_year, scales ='free_x') +
+  labs(title = 'Kyiv Post Body Text Sentiment Negations - by Year of War', x = 'Day of Publication', y = 'Sentiment') +
+    scale_x_date(date_breaks = '2 months', # Breaks every 2 months
+               date_labels = '%b', # month abbreviated   
+               expand = c(0,0)) +
+    theme_excel_new() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6', size = 12),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) +
+    scale_fill_viridis_d(option = 'turbo')
+
+
+
+
+
+
+
+
+```
+
+```{r Comparisons between all sentiment analyses}
+
+patchwork1 <- (kp_body_sentiment_viz /gu_body_sentiment_viz)
+
+patchwork1 + plot_layout(axis_titles = 'collect', axes = 'collect')
+
+
+```
+
+
+
+```{r The Guardian and Kyiv Post Document-Feature Matrices}
+
+gu_body_tokens_dfm <- quanteda::tokens(gu_articles$body_text,
+                         remove_punct = T,
+                         remove_symbols = T,
+                         remove_numbers = F, #We explicitly keep numbers because they're a key part of war-reporting
+                         normalize = T) %>%
+  tokens_tolower() %>% 
+  quanteda::dfm(verbose = F)
+
+
+
+
+gu_headline_tokens_dfm <- quanteda::tokens(gu_articles$headline,
+                         remove_punct = T,
+                         remove_symbols = T,
+                         remove_numbers = T, 
+                         normalize = T) %>%
+  tokens_tolower() %>% 
+  quanteda::dfm(verbose = F)
+
+
+
+
+
+
+kp_body_tokens_dfm <- quanteda::tokens(kp_articles$body_text,
+                         remove_punct = T,
+                         remove_symbols = T,
+                         remove_numbers = F, #We explicitly keep numbers because they're a key part of war-reporting
+                         normalize = T) %>%
+  tokens_tolower() %>% 
+  quanteda::dfm(verbose = F)
+
+
+
+
+
+
+kp_title_tokens_dfm <- quanteda::tokens(kp_articles$title,
+                         remove_punct = T,
+                         remove_symbols = T,
+                         remove_numbers = T, 
+                         normalize = T) %>%
+  tokens_tolower() %>% 
+  quanteda::dfm(verbose = F)
+
+
+
+
+
+
+
+gu_body_tokens_dtm <- gu_body_tokens %>%
+  cast_dtm(id, word, n)
+
+
+```
+
+
+
+```{r LDA topic analysis}
+
+# Specific stopwords that are used for LDA because they will show up in virtually every article 
+domain_stopwords <-  c("ukraine", "russia", "russian", "ukrainian", "ukraine's", "russia's"
+    "war", "reporting", "report")
+
+
+
+gu_headline_tokens_lda <- LDA(gu_headline_tokens_dfm, k = 2, control = list(seed = 1234))
+
+gu_headline_topics <- tidy(gu_headline_tokens_lda, matrix = "beta")
+gu_headline_topics
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r The Guardian Tokens Frequencies Visualizations}
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words across all years
+gu_body_tokens_viz <- gu_body_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'The Guardian Body Text Top 10 Words Across All Years', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    theme(
+    # Turn the entire background blue
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words faceted by year of war
+gu_body_tokens_viz_yearly <- gu_body_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'The Guardian Body Text Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words across all years
+gu_headline_tokens_viz <- gu_headline_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'The Guardian Headline Top 10 Words', x = 'Count', y = 'Word') +
+    scale_x_continuous(breaks = seq(0,4000, 500)) +
+    theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+# Possibly remove briefing from headlines because it doesn't really match here. However. It doesn't matter that much 
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words faceted by year of war
+gu_headline_tokens_viz_yearly <- gu_headline_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'The Guardian Headlines Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(breaks = seq(0, 1500, 500), limits = c(0, 1500)) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+# Left briefing in even though it is a title, because it tells us something about the populatiry of the category of such articles and its popularity over the years. 
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+WHAT COMES AFTER THIS IS ALL APPENDIX
+```{r Kyiv Post Tokens Frequencies Visualizations}
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words across all years
+kp_body_tokens_viz <- kp_body_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'Kyiv Post Body Text Top 10 Words Across All Years', 
+    x = 'Count', 
+    y = 'Word'
+    ) +
+    theme_excel_new() +
+    theme(
+    # Turn the entire background blue
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words faceted by year of war
+kp_body_tokens_viz_yearly <- kp_body_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'Kyiv Post Body Text Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words across all years
+kp_title_tokens_viz <- kp_title_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'Kyiv Post Headline Top 10 Words', x = 'Count', y = 'Word') +
+    scale_x_continuous(breaks = seq(0,4000, 500)) +
+    theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+# Possibly remove briefing from headlines because it doesn't really match here. However. It doesn't matter that much 
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words faceted by year of war
+kp_title_tokens_viz_yearly <- kp_title_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'Kyiv Post Headlines Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(breaks = seq(0, 1500, 500), limits = c(0, 1500)) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+```
+
+```{r KP and The Guardian Word Frequencies Comparisons}
+
+# comparison between total body token frequencies 
+kp_body_tokens_viz/gu_body_tokens_viz
+
+# comparison between yearly body token frequencies
+kp_body_tokens_viz_yearly/gu_body_tokens_viz_yearly
+
+# comparison between total headline token frequencies
+kp_title_tokens_viz/gu_headline_tokens_viz
+
+# comparison between yearly headline token frequencies
+kp_title_tokens_viz_yearly/gu_headline_tokens_viz_yearly
+
+```
+
+
+```{r Frequency comparisons - Kyiv Post and The Guardian}
+
+frequency_body <- bind_rows(
+  kp_body_tokens %>% mutate(journal = 'kyiv_post'),
+  gu_body_tokens %>% mutate(journal = 'the_guardian')) %>% # -id is to avoid conflict between ids because of class mismatch 
+  mutate(word = str_extract(word, "[a-z']+")) %>% # only words, because numbers would be too unique
+  count(journal, word) %>%
+  group_by(journal) %>%
+  mutate(proportion = n/sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = journal, values_from = proportion) 
+
+frequency_body
+
+
+
+
+# MAKE IT WORK BETTER LATER
+frequency_body %>%
+  ggplot(aes(x = kyiv_post, y = the_guardian, color = kyiv_post - the_guardian)) +
+  geom_abline(color = '#FAF9F6', linetype = 2) +
+  geom_jitter(alpha = .1, size = 2.5, width = .3, height = .3, show.legend = F) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5, show.legend = F) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient2(
+    low = '#FF8C00',      # Color for words predominant in The Guardian (negative)
+    mid = '#FAF9F6',      # Neutral color for words on the diagonal line (zero difference)
+    high = '#FFD700',     # Color for words predominant in Kyiv Post (positive)
+    midpoint = 0,
+    limits = c(-0.0005, 0.0005),
+    oob = scales::squish # Prevents points outside limits from turning gray/invisible
+  ) +
+  labs(y = 'The Guardian', x = 'The Kyiv Post') +
+  theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'),
+    legend.position = 'none'
+    ) 
+
+cor.test(frequency_body$kyiv_post, frequency_body$the_guardian)
+cor.test(frequency_body$kyiv_post, frequency_body$the_guardian, method = 'spearman') # spearman test for robustness
+
+
+
+
+
+
+frequency_headline <- bind_rows(
+  kp_title_tokens  %>% mutate(journal = 'kyiv_post'),
+  gu_headline_tokens  %>% mutate(journal = 'the_guardian')) %>% # -id is to avoid conflict between ids because of class mismatch 
+  mutate(word = str_extract(word, "[a-z']+")) %>% # only words, because numbers would be too unique
+  count(journal, word) %>%
+  group_by(journal) %>%
+  mutate(proportion = n/sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = journal, values_from = proportion) 
+
+frequency_headline
+
+
+
+frequency_headline %>%
+  ggplot(aes(x = kyiv_post, y = the_guardian, color = kyiv_post - the_guardian)) +
+  geom_abline(color = '#FAF9F6', linetype = 2) +
+  geom_jitter(alpha = .1, size = 2.5, width = .3, height = .3, show.legend = F) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5, show.legend = F) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient2(
+    low = '#FF8C00',      # Color for words predominant in The Guardian (negative)
+    mid = '#FAF9F6',      # Neutral color for words on the diagonal line (zero difference)
+    high = '#FFD700',     # Color for words predominant in Kyiv Post (positive)
+    midpoint = 0,
+    limits = c(-0.0005, 0.0005),
+    oob = scales::squish # Prevents points outside limits from turning gray/invisible
+  ) +
+  labs(y = 'The Guardian', x = 'The Kyiv Post') +
+  theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'),
+    legend.position = 'none'
+    ) 
+
+
+cor.test(frequency_headline$kyiv_post, frequency_headline$the_guardian)
+cor.test(frequency_headline$kyiv_post, frequency_headline$the_guardian, method = 'spearman')
+
+
+#### REDO THIS WITH LEMMATIZATION
+
+
+year_term_counts %>%
+  filter(term %in% c("god", "america", "foreign", "union", "constitution", "freedom")) %>%
+  ggplot(aes(year, count / year_total)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~ term, scales = "free_y") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(y = "% frequency of word in inaugural address")
+
+```
+
+
+
+```{r The Guardian dictionary sentiment analysis - by year}
+
+
+#### FIX DATES LATER
+
+sentiments <- get_sentiments('bing')
+
+
+# Body_tokens
+gu_body_sentiment <- gu_body_tokens %>%
+  inner_join(sentiments, by = 'word') %>%
+  count(war_year, pub_date, pub_year, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(net_sentiment = positive - negative,
+  total_sentiment = positive + negative,
+  ratio_sentiment = net_sentiment / total_sentiment) # proportional 
+
+
+gu_body_sentiment_viz <- ggplot(gu_body_sentiment, aes(x = pub_date, y = ratio_sentiment, fill = as.factor(war_year))) +
+  geom_col(show.legend = F) +
+  geom_smooth(show.legend = F) +
+  facet_wrap(~war_year, scales ='free_x') +
+  labs(title = 'The Guardian Body Text Sentiment - Year by Year', x = 'Day of Publication', y = 'Sentiment') +
+  scale_x_date(date_breaks = '2 months', # Breaks every 2 months
+               date_labels = '%b', # month abbreviated   
+               expand = c(0,0)) +
+    theme_excel_new() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6', size = 12),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+
+
+
+# Headline tokens
+gu_headline_sentiment <- gu_headline_tokens %>%
+  inner_join(sentiments, by = 'word') %>%
+  count(war_year, pub_date, pub_year, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(net_sentiment = positive - negative,
+  total_sentiment = positive + negative,
+  ratio_sentiment = net_sentiment / total_sentiment)
+
+gu_headline_sentiment_viz <- ggplot(gu_headline_sentiment, aes(pub_date, ratio_sentiment, fill = as.factor(war_year))) +
+  geom_col(show.legend = F) +
+  geom_smooth(show.legend = F) +
+  facet_wrap(~war_year, scales ='free_x') +
+  labs(title = 'The Guardian Headline Text Sentiment - Year by Year', x = 'Day of Publication', y = 'Sentiment') +
+  scale_x_date(date_breaks = '2 months', # Breaks every 2 months
+               date_labels = '%b', # month abbreviated   
+               expand = c(0,0)) +
+    theme_excel_new() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6', size = 12),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+
+
+
+
+### Equalizing as a ratio? - normalizing? 
+
+```
+
+Headlines seem a lot more balanced when it comes to dictionary style sentiment analysis.
+
+We use the 'bing' dictionary because it is comparitively extensive to the other sentiment dictionaries, which suits the varied corpus of a news outlet with various authors. Comparison: https://medium.com/@laurenflynn1211/comparing-sentiment-analysis-dictionaries-in-r-c695fca64326
+
+
+
+```{r Kyiv Post dictionary sentiment - by year}
+
+
+
+# Body_tokens
+kp_body_sentiment <- kp_body_tokens %>%
+  inner_join(sentiments, by = 'word') %>%
+  count(war_year, pub_date, pub_year, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(net_sentiment = positive - negative,
+  total_sentiment = positive + negative,
+  ratio_sentiment = net_sentiment / total_sentiment) # proportional 
+
+
+kp_body_sentiment_viz <- ggplot(kp_body_sentiment, aes(x = pub_date, y = ratio_sentiment, fill = as.factor(war_year))) +
+  geom_col(show.legend = F) +
+  geom_smooth(show.legend = F) +
+  facet_wrap(~war_year, scales ='free_x') +
+  labs(title = 'Kyiv Post Body Text Sentiment - Year by Year', x = 'Day of Publication', y = 'Sentiment') +
+  scale_x_date(date_breaks = '2 months', # Breaks every 2 months
+               date_labels = '%b', # month abbreviated   
+               expand = c(0,0)) +
+    theme_excel_new() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6', size = 12),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+
+
+
+# Headline tokens
+kp_title_sentiment <- kp_title_tokens %>%
+  inner_join(sentiments, by = 'word') %>%
+  count(war_year, pub_date, pub_year, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(net_sentiment = positive - negative,
+  total_sentiment = positive + negative,
+  ratio_sentiment = net_sentiment / total_sentiment)
+
+kp_title_sentiment_viz <- ggplot(kp_title_sentiment, aes(pub_date, ratio_sentiment, fill = as.factor(war_year))) +
+  geom_col(show.legend = F) +
+  geom_smooth(show.legend = F) +
+  facet_wrap(~war_year, scales ='free_x') +
+  labs(title = 'Kyiv Post Headline Text Sentiment - Year by Year', x = 'Day of Publication', y = 'Sentiment') +
+  scale_x_date(date_breaks = '2 months', # Breaks every 2 months
+               date_labels = '%b', # month abbreviated   
+               expand = c(0,0)) +
+    theme_excel_new() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6, color = '#FAF9F6'),
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6', size = 12),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+
+
+
+```
+
+```{r Sentiment Analysis Comparison between The Guardian and Kyiv Post}
+
+gu_body_sentiment_viz / kp_body_sentiment_viz
+
+gu_headline_sentiment_viz / kp_title_sentiment_viz
+
+
+```
+
+```{r The Guardian word tf-idf}
+
+gu_body_tfidf <- gu_body_tokens %>%
+  count(pub_year, id, word, sort = T) %>%
+  bind_tf_idf(term = word, document = id, n = n) 
+
+gu_body_tfidf %>%
+  group_by(pub_year, word) %>%
+  summarize(tf_idf = max(tf_idf), .groups = 'drop') %>%
+  group_by(pub_year) %>%
+  slice_max(tf_idf, n = 15, with_ties = F) %>%
+  ungroup() %>%
+  ggplot(aes(tf_idf, reorder_within(word, tf_idf, pub_year), fill = as.factor(pub_year))) +
+  geom_col(show.legend = F) +
+  facet_wrap(~pub_year, scales = 'free') +
+  labs(x = 'tf-idf score', y = NULL) +
+  scale_y_reordered() +
+  theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+
+
+# tf-idf doesn't deliver much for body_text - why is that???
+# The reason for these peculiar results are because short articles where one of these words get mentioned a few times and are almost never mentioned in other articles, results in high tf-idf scores for words that almost never get mentioned. This is somewhat characteristic of the data we're dealing with - huge amount of smaller articles. 
+
+# This is also why it is useless to check this for headlines. However, what can be done is concatonating texts per month or per date
+
+
+# Tf-idf inherently rewards exclusivity of words. The problem is that a lot of words are going to be exclusive in a varied corpus like news articles 
+
+
+```
+
+
+```{r Combined visualization of bigrams that start with negation word}
+
+
+gu_negation_words %>%
+  mutate(sentiment = ifelse(sentiment == 'positive', 1, -1)) %>%
+  mutate(contribution = n * sentiment) %>%
+  arrange(desc(abs(contribution))) %>%
+  group_by(word1) %>%
+  slice_max(order_by = abs(contribution), n = 20, with_ties = F) %>%
+  ungroup() %>%
+  ggplot(aes(x = contribution, y = reorder_within(word2, contribution, word1), fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~word1, scales = 'free') +
+  labs(x = 'Contribution: Sentiment value * number of occurrences',
+       y = 'Words preceded by a negation',
+       title = 'Top 20 Words in Sentiment Contribution Preceded by Negation Words') +
+        scale_y_reordered() +
+         theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+
+
+kp_negation_words %>%
+  mutate(sentiment = ifelse(sentiment == 'positive', 1, -1)) %>%
+  mutate(contribution = n * sentiment) %>%
+  arrange(desc(abs(contribution))) %>%
+  group_by(word1) %>%
+  slice_max(order_by = abs(contribution), n = 20, with_ties = F) %>%
+  ungroup() %>%
+  ggplot(aes(x = contribution, y = reorder_within(word2, contribution, word1), fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~word1, scales = 'free') +
+  labs(x = 'Contribution: Sentiment value * number of occurrences',
+       y = 'Words preceded by a negation',
+       title = 'Top 20 Words in Sentiment Contribution Preceded by Negation Words') +
+        scale_y_reordered() +
+         theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    strip.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+    ) 
+
+
+```

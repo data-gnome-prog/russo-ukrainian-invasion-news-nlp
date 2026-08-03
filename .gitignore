@@ -1,0 +1,10 @@
+# Block Quarto temporary visual markdown editor files
+**/.vdoc.*
+.qmd_cache/
+html_cache/
+
+# Block heavy R data storage files (highly recommended)
+*.rds
+*.RData
+*.Rhistory
+.Rproj.user/
