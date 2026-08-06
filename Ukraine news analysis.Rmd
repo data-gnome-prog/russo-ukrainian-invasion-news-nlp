@@ -12,18 +12,25 @@ output: html
 #install.packages('ggthemes')
 #install.packages('textdata')
 #install.packages('widyr')
+#install.packages('textmineR')
+#install.packages('purrr')
+#install.packages('future')
+#install.packages('furrr')
 
 # Tidyverse paradigm
 library(dplyr)
 library(tidyverse)
 library(widyr)
+library(purrr)
 
+
+# Date and time
+library(lubridate)
 
 # API and webscraping
 library(rvest)
 library(httr2)
 library(guardianapi)
-
 
 # Visualizations
 library(ggplot2)
@@ -43,6 +50,11 @@ library(textstem)
 library(tidytext)
 library(textdata)
 library(topicmodels)
+library(textmineR)
+library(topicdoc)
+library(reshape2)
+
+
 
 
 
@@ -197,7 +209,7 @@ return(bind_rows(all_pages_dfs)) # binding the of the list together and returnin
 
 
 # The overarching function that incorporates the previous two functions and caches 
-kp_scraper <- function(cache_file = 'kp_articles.rds', force_refresh = FALSE) { # Caches the file 
+kp_scraper <- function(cache_file = 'data/kp_articles.rds', force_refresh = FALSE) { # Caches the file 
   if (file.exists(cache_file) && !force_refresh) { # Checks if the file exists in cache and not force refreshed
   file_age <- difftime(Sys.time(), file.mtime(cache_file), 
   units = 'weeks') # If the file already exists checks how old it is in weeks
@@ -233,7 +245,7 @@ kp_data <- kp_scraper()
 ```{r Getting Guardian Data with API}
 
 # Checks for cached file and if it exists already, it uses that. Since the file is fixed in time, it doesn't check for age. If file doesn't exist yet, it queries the API for all content on ukraine and war from the start of invasion to exactly 4 years later
-get_guardian_content <- function(cache_file = 'gu_ua_war_content.rds', force_refresh = FALSE) {
+get_guardian_content <- function(cache_file = 'data/gu_ua_war_content.rds', force_refresh = FALSE) {
   if (file.exists(cache_file) && !force_refresh) {
     print('Loading cached data') 
     return(readRDS(cache_file))  }
@@ -376,7 +388,7 @@ gu_articles <- gu_articles_full %>%
 
 ```
 
-```{r Basic Descriptives of Corpi - KP and the Guardian}
+```{r Basic Descriptives of Corpora - KP and the Guardian}
 
 
 
@@ -673,37 +685,44 @@ kp_articles_plot_year/gu_articles_plot_year
 # Stopwords used 
 head(stop_words)
 
-
-
 # For comparison between words, we use the corpi of the Guardian and Kyiv Post that starts on the fifth of June, considering it is the first post that is available on the Kyiv Post website after the restructure. 
 
 # Unnesting words as tokens from body_text - The Guardian
 gu_body_tokens_raw <- gu_articles %>%
-  unnest_tokens(word, body_text) %>% # default is words
+  unnest_tokens(word, body_text) %>%
+  mutate(word = tolower(word)) %>% # convert all words to lowercase for consistency 
+  mutate(word = str_remove_all(word, regex('guardian', ignore_case = T))) %>% # remove the word 'guardian' from the body text, as it is a common word in the Guardian articles and is not relevant to the analysis
+  filter(str_detect(word, "^[a-z]+$")) %>%
   anti_join(stop_words) # anti-join that removes standard stopwords (tidytext package)
 
 # Unnesting words as tokens from headline - The Guardian
 gu_headline_tokens_raw <- gu_articles  %>%
-  mutate(
-    headline = str_remove(headline, regex("War briefing:?\\s*", ignore_case = TRUE)) # Removes "War briefing" (and any trailing colon/spaces) only at the start of a headline 
-  ) %>%
+  mutate(headline = str_remove(headline, regex("War briefing:?\\s*", ignore_case = TRUE))) %>%  # Removes "War briefing" (and any trailing colon/spaces) only at the start of a headline 
   unnest_tokens(word, headline) %>%
+  mutate(word = tolower(word)) %>% # convert all words to lowercase for consistency 
+  filter(str_detect(word, "^[a-z]+$")) %>%
   anti_join(stop_words) 
 
 
 kp_body_tokens_raw <- kp_articles %>%
   unnest_tokens(word, body_text) %>%
+  mutate(word = tolower(word)) %>% # convert all words to lowercase for consistency 
+  filter(str_detect(word, "^[a-z]+$")) %>%
   anti_join(stop_words)
 
 kp_title_tokens_raw <- kp_articles %>%
   unnest_tokens(word, title) %>%
+  mutate(word = tolower(word)) %>% # convert all words to lowercase for consistency 
+  filter(str_detect(word, "^[a-z]+$")) %>%
   anti_join(stop_words)
 
 kp_lead_tokens_raw <- kp_articles %>%
   unnest_tokens(word, lead_text) %>%
+  mutate(word = tolower(word)) %>% # convert all words to lowercase for consistency 
+  filter(str_detect(word, "^[a-z]+$")) %>%
   anti_join(stop_words)
 
-
+# used preprocessing steps common for LDA 
 
 ```
 
@@ -718,7 +737,6 @@ kp_body_tokens <- kp_body_tokens_raw %>%
 
 kp_title_tokens <- kp_title_tokens_raw %>% 
   mutate(word = lemmatize_words(word))
-
 
 
 
@@ -1340,192 +1358,501 @@ patchwork1 + plot_layout(axis_titles = 'collect', axes = 'collect')
 
 
 
-```{r The Guardian and Kyiv Post Document-Feature Matrices}
+```{r The Guardian and Kyiv Post Conversion to Document Term Matrices}
 
-gu_body_tokens_dfm <- quanteda::tokens(gu_articles$body_text,
-                         remove_punct = T,
-                         remove_symbols = T,
-                         remove_numbers = F, #We explicitly keep numbers because they're a key part of war-reporting
-                         normalize = T) %>%
-  tokens_tolower() %>% 
-  quanteda::dfm(verbose = F)
+# Conversion to DTM using the tidytext cast function. This is necessary for LDA topic modeling, combining both the Guardian and Kyiv Post tokens into a single DTM for each publication.
 
 
+domain_stopwords <- tibble(word = c('ukraine', 'russia', 'ukrainian', 'russian', 'war', 'zelenskyy', 'putin', 'post', 'brief', 'time', 'uk', 'day', 'lead', 'story', 'report', 'news', 'write', 'world', 'week', 'month', 'year'))
 
 
-gu_headline_tokens_dfm <- quanteda::tokens(gu_articles$headline,
-                         remove_punct = T,
-                         remove_symbols = T,
-                         remove_numbers = T, 
-                         normalize = T) %>%
-  tokens_tolower() %>% 
-  quanteda::dfm(verbose = F)
+total_docs <- n_distinct(c(paste0('gu_', gu_body_tokens_raw$id), 
+                           paste0('kp_', kp_body_tokens_raw$id)))
 
+                        
 
+# Extracting metadata 
+doc_metadata <- bind_rows(
+    gu_body_tokens%>% 
+      select(id, pub_date) %>% 
+      mutate(id = paste0("gu_", id), source = 'The Guardian'),
+    kp_body_tokens%>% 
+      select(id, pub_date) %>% 
+      mutate(id = paste0("kp_", id), source = 'Kyiv Post')
+  ) %>%
+  distinct(id, .keep_all = TRUE) %>% # deduplicate
+  mutate(
+    date  = as.Date(pub_date),
+    year  = year(date),
+    month = floor_date(date, 'month'),
+    war_year = case_when(
+      year == 2022 ~ 1,
+      year == 2023 ~ 2,
+      year == 2024 ~ 3,
+      year == 2025 ~ 4,
+      year == 2026 ~ 5,
+      TRUE ~ NA_real_
+    )
+  )
 
+                    
 
-
-
-kp_body_tokens_dfm <- quanteda::tokens(kp_articles$body_text,
-                         remove_punct = T,
-                         remove_symbols = T,
-                         remove_numbers = F, #We explicitly keep numbers because they're a key part of war-reporting
-                         normalize = T) %>%
-  tokens_tolower() %>% 
-  quanteda::dfm(verbose = F)
-
-
-
-
-
-
-kp_title_tokens_dfm <- quanteda::tokens(kp_articles$title,
-                         remove_punct = T,
-                         remove_symbols = T,
-                         remove_numbers = T, 
-                         normalize = T) %>%
-  tokens_tolower() %>% 
-  quanteda::dfm(verbose = F)
-
-
-
-
-
-
-
-gu_body_tokens_dtm <- gu_body_tokens %>%
+pooled_body_tokens_dtm <- bind_rows(gu_body_tokens %>% mutate(id = paste0('gu_', id)) %>% anti_join(domain_stopwords, by = 'word'),
+                          kp_body_tokens %>% mutate(id = paste0('kp_', id)) %>% anti_join(domain_stopwords, by = 'word')) %>%
+                          group_by(word) %>%
+                          mutate(doc_freq = n_distinct(id)) %>%
+                          ungroup() %>%
+                          filter(doc_freq >= 100) %>% # filter out words that appear in less than 50 documents - lower bound - should probably be changed to a different measure of frequency
+                          filter(doc_freq <= total_docs * 0.99) %>% # filter out words that appear in more than 90% of documents - upper bound
+  count(id, word, sort = TRUE) %>%
   cast_dtm(id, word, n)
 
+dim(pooled_body_tokens_dtm)
+
+
+pooled_headline_tokens_dtm <- bind_rows(gu_headline_tokens %>% mutate(id = paste0('gu_', id)) %>% anti_join(domain_stopwords, by = 'word'),
+                          kp_title_tokens %>% mutate(id = paste0('kp_', id)) %>% anti_join(domain_stopwords, by = 'word')) %>%
+                          group_by(word) %>%
+                          mutate(word = tolower(word)) %>% # convert all words to lowercase for consistency
+                          mutate(doc_freq = n_distinct(id)) %>%
+                          ungroup() %>%
+                          filter(doc_freq >= 10) %>% # filter out words that appear in less than 10 documents                  
+  count(id, word, sort = TRUE) %>%
+  cast_dtm(id, word, n)
+
+dim(pooled_headline_tokens_dtm)
+
+
+
+
 
 ```
 
 
 
-```{r LDA topic analysis}
+```{r LDA How many topics to choose}
 
-# Specific stopwords that are used for LDA because they will show up in virtually every article 
-domain_stopwords <-  c("ukraine", "russia", "russian", "ukrainian", "ukraine's", "russia's"
-    "war", "reporting", "report")
+# Perform LDA on the preprocessed full texts with different numbers of topics
 
 
+lda_evaluate_k <- function(dtm, k_min = 2, k_max = 20, seed = 7893, terms_n = 20) {
 
-gu_headline_tokens_lda <- LDA(gu_headline_tokens_dfm, k = 2, control = list(seed = 1234))
+  results_lda <- list()
+  topics <- list()
 
-gu_headline_topics <- tidy(gu_headline_tokens_lda, matrix = "beta")
-gu_headline_topics
+for (k in seq(k_min, k_max, by = 2)) { 
+
+  print(paste0('Evaluating LDA with k = ', k, ' of ', k_max))
+
+    alpha <- 1/((1:k) + sqrt(k))  # dynamically calculates alpha        
+    lda <- LDA(dtm, k = k, control = list(seed = seed, alpha = alpha))
+    
+    # perplexity, coherence, and exclusivity are calculated for each LDA model at k and stored in a data frame within the results_lda list
+    results_lda[[as.character(k)]] <- data.frame(
+      k = k,
+      perplexity = perplexity(lda),   
+      coherence = mean(topic_coherence(lda, dtm)), 
+      exclusivity = topic_exclusivity(lda))
+
+    topics[[as.character(k)]] <- data.frame(terms(lda, terms_n))
+
+} 
+
+evaluation_summary <- bind_rows(results_lda)
+return(list(
+  eval_results = evaluation_summary,
+  topics = topics
+))
+ }
+
+
+
+
+
+
+# Extensive use of LLM used for help - but checked with the original documentation
+
+
+body_tokens_lda_eval_k <- lda_evaluate_k(dtm = pooled_body_tokens_dtm)
+headline_tokens_lda_eval_k <- lda_evaluate_k(dtm = pooled_headline_tokens_dtm, terms_n = 10) # headline tokens have fewer words, so we limit the number of terms to 10 for better interpretability
+
+
+
 
 ```
 
 
 
+```{r LDA Hyperparameter Evaluation Across k Body Text}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-```{r The Guardian Tokens Frequencies Visualizations}
-
-# Guardian Tokens Body Text Frequencies visualizations - top 10 words across all years
-gu_body_tokens_viz <- gu_body_tokens %>%
-  count(word, sort = T) %>%
-  slice_max(n = 10, order_by = n) %>%
-  mutate(word = reorder(word, n)) %>%
-  ggplot(aes(n, word)) +
-    geom_col(fill = '#FAF9F6') +
-    labs(title = 'The Guardian Body Text Top 10 Words Across All Years', x = 'Count', y = 'Word') +
-    theme_excel_new() +
-    theme(
-    # Turn the entire background blue
+body_tokens_lda_eval_k$eval_results %>%
+  select(k, perplexity, coherence) %>%
+  mutate(k = as.numeric(k)) %>%
+  pivot_longer(cols = -k, names_to = 'metric', values_to = 'values') %>%
+  ggplot(aes(x = k, y = values)) +
+  geom_line(color = '#FAF9F6', linewidth = 1) +
+  geom_point(color = '#FAF9F6', size = 2) +
+  facet_wrap(metric ~ ., scales = 'free', ncol = 1, strip.position = 'right') +
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Score Value',
+    title = 'LDA Hyperparameter Evaluation Across k Body Text',
+    subtitle = 'Perplexity and Coherence scores across different numbers of topics (k)',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
     panel.background = element_rect(fill = '#0057B7'),
     plot.background = element_rect(fill = '#0057B7'),
     plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
     axis.text = element_text(color = '#FAF9F6'),
-    axis.title = element_text(color = '#FAF9F6')
-    )
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    plot.caption = element_text(color = '#FAF9F6')
+    ) 
+
+
+body_tokens_lda_eval_k$eval_results %>%
+  select(k, exclusivity) %>%
+  mutate(k = as.numeric(k)) %>%
+  ggplot(aes(x = k, y = exclusivity)) +
+  geom_point(color = '#FAF9F6', size = 2.5) +
+  
+  # Highlight k = 14 explicitly with a marker
+  geom_point(data = . %>% filter(k == 14), color = "#FFD700", size = 4) +
+  
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Exclusivity Score',
+    title = 'Topic Exclusivity Across k Body Text',
+    subtitle = 'Gold point indicates candidate k = 14',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    plot.caption = element_text(color = '#FAF9F6', size = 9, hjust = 1),
+    panel.grid.major = element_line(color = "#4082c4"),
+    panel.grid.minor = element_blank()
+  )
 
 
 
-# Guardian Tokens Body Text Frequencies visualizations - top 10 words faceted by year of war
-gu_body_tokens_viz_yearly <- gu_body_tokens %>%
-  count(war_year, word, sort = T) %>%
-  group_by(war_year) %>%
-  slice_max(n = 10, order_by = n) %>% 
+```
+
+
+
+```{r LDA topic interpretation body text under k = 14}
+
+body_tokens_lda_eval_k$topics
+
+body_tokens_lda_eval_k$topics$`14`
+
+```
+
+
+
+```{r LDA initializing Topic Analysis Body Text - 14 topics}
+
+lda_body_text <- LDA(pooled_body_tokens_dtm, 
+  k = 14, 
+  method = 'Gibbs',
+  control = list(seed = 7893, alpha = .1, iter = 2000, thin = 100))
+
+```
+
+
+
+
+```{r Analysis of LDA Body Text Topics - and interpretation}
+
+topic_names <- c(
+  '1' = 'Military Ops',
+  
+)
+
+
+terms(lda_body_text, 10)
+
+lda_body_topics <- tidy(lda_body_text, matrix = 'beta') 
+
+
+top_terms <- lda_body_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
   ungroup() %>%
-  mutate(word = reorder_within(word, n, war_year)) %>%
-  ggplot(aes(n, word, fill = as.factor(war_year))) +
-    geom_col(show.legend = FALSE) +
-    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
-    scale_y_reordered() +
-    labs(title = 'The Guardian Body Text Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+  arrange(topic, -beta)
+
+
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>% # reorder the terms as a factor according to beta
+  ggplot(aes(x= beta, y = term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = 'free_y') +
+  scale_y_reordered() +
+  theme_excel_new() +
+  scale_fill_viridis_d(option = 'rocket') +
+  labs(title = 'Substantial Topic Analysis',
+      y = 'Terms',
+      x = 'Beta - Contribution of Term to Topic',
+      subtitle = 'How Much Does Each Term Contribute to a Topic?',
+      caption = 'Information from theguardian.com and kyivpost.com') +
+  theme( 
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    plot.caption.position = 'plot',
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    plot.caption = element_text(color = '#FAF9F6', size = 9, hjust = 1),
+    panel.grid.major = element_line(color = "#4082c4"),
+    panel.grid.minor = element_blank(),
+    strip.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6')
+  )
+
+
+
+```
+
+```{r Analysis of Gamma Values for LDA Body Text Topics}
+
+# Which gamma value belongs to which topic for each document and which publication it belongs to
+
+
+lda_body_gamma <- tidy(lda_body_text, matrix = 'gamma') %>% 
+  left_join(doc_metadata, by = c('document' = 'id'))# joining metadata to the gamma values for each document based on ids
+
+lda_body_gamma_percentages <- lda_body_gamma%>%
+  group_by(source, topic) %>%
+  summarize(avg_gamma = mean(gamma), .groups = 'drop' ) %>%
+  group_by(source) %>%
+  mutate(percentage = avg_gamma / sum(avg_gamma))
+
+
+
+lda_body_gamma_percentages %>%
+  ggplot(aes(x = factor(topic), y = percentage, fill = factor(source))) +
+  geom_col(show.legend = T, position = 'dodge') +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_excel_new() +
+  labs(title = 'Representation of Topics by Source - The Guardian and Kyiv Post',
+      y = 'Percentage of Gamma',
+      x = 'Topic',
+      subtitle = 'How Much Does Each Topic Belong to a Source?',
+      caption = 'Information from theguardian.com and kyivpost.com') +
+  theme( 
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    legend.background = element_rect(fill = '#0057B7'),
+    legend.text = element_text(color = '#FAF9F6'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    plot.caption.position = 'plot',
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    plot.caption = element_text(color = '#FAF9F6', size = 9, hjust = 1),
+    panel.grid.major = element_line(color = "#4082c4"),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(color = '#FAF9F6')
+  ) 
+
+  
+lda_correctness_check <- lda_body_gamma_percentages %>%
+  summarize(sum = sum(percentage)) # Check
+
+
+
+
+# other visualization - less useful since there is naturally a lot of overlap - robustness check to previous visualization
+lda_body_gamma_percentages %>%
+  ggplot(aes(factor(topic), gamma, color = source)) +
+  geom_boxplot(position = 'dodge') +
     theme_excel_new() +
-    scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) + 
-    theme(
+  labs(title = 'Representation of Topics by Source with Boxplots - The Guardian and Kyiv Post',
+      y = 'Distribution of Gamma',
+      x = 'Topic',
+      subtitle = 'How Much Does Each Topic Belong to a Source?',
+      caption = 'Information from theguardian.com and kyivpost.com') +
+  theme( 
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    legend.background = element_rect(fill = '#0057B7'),
+    legend.text = element_text(color = '#FAF9F6'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    plot.caption.position = 'plot',
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    plot.caption = element_text(color = '#FAF9F6', size = 9, hjust = 1),
+    panel.grid.major = element_line(color = "#4082c4"),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(color = '#FAF9F6')
+  )
+  
+
+
+
+
+
+```
+
+
+
+```{r Analysis of Gamma Values for LDA Body Text Topics - Cross-sectional Overtime}
+
+
+lda_body_gamma %>%
+  group_by(source, war_year, topic) %>%
+  summarize(avg_gamma = mean(gamma), .groups = 'drop' ) %>%
+  group_by(source, war_year) %>%
+  mutate(percentage = avg_gamma / sum(avg_gamma)) %>%
+  ggplot(aes(x = factor(topic), y = percentage, fill = factor(source))) +
+  geom_col(show.legend = T, position = 'dodge') +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_excel_new() +
+  labs(title = 'Representation of Topics by Source - The Guardian and Kyiv Post',
+      y = 'Percentage of Gamma',
+      x = 'Topic',
+      subtitle = 'How Much Does Each Topic Belong to a Source?',
+      caption = 'Information from theguardian.com and kyivpost.com') +
+  theme( 
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    legend.background = element_rect(fill = '#0057B7'),
+    legend.text = element_text(color = '#FAF9F6'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    plot.caption.position = 'plot',
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    plot.caption = element_text(color = '#FAF9F6', size = 9, hjust = 1),
+    panel.grid.major = element_line(color = "#4082c4"),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(color = '#FAF9F6')
+  ) +
+    facet_wrap(~war_year)
+  
+```
+
+
+
+
+
+
+
+
+```{r LDA Hyperparameter Evaluation Across k Headline Text}
+
+headline_tokens_lda_eval_k$eval_results %>%
+  select(k, perplexity, coherence) %>%
+  mutate(k = as.numeric(k)) %>%
+  pivot_longer(cols = -k, names_to = 'metric', values_to = 'values') %>%
+  ggplot(aes(x = k, y = values)) +
+  geom_line(color = '#FAF9F6', linewidth = 1) +
+  geom_point(color = '#FAF9F6', size = 2) +
+  facet_wrap(metric ~ ., scales = 'free', ncol = 1, strip.position = 'right') +
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Score Value',
+    title = 'LDA Hyperparameter Evaluation Across k Headline Text',
+    subtitle = 'Perplexity and Coherence scores across different numbers of topics (k)',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    plot.caption = element_text(color = '#FAF9F6'),
+    ) 
+
+
+headline_tokens_lda_eval_k$eval_results %>%
+  select(k, exclusivity) %>%
+  mutate(k = as.numeric(k)) %>%
+  ggplot(aes(x = k, y = exclusivity)) +
+  geom_point(color = '#FAF9F6', size = 2.5) +
+  
+  # Highlight k = 12 explicitly with a marker
+  geom_point(data = . %>% filter(k == 12), color = "#FFD700", size = 4) +
+  
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Exclusivity Score',
+    title = 'Topic Exclusivity Across k Headline Text',
+    subtitle = 'Gold point indicates candidate k = 12',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    plot.caption = element_text(color = '#FAF9F6', size = 9, hjust = 1),
+    panel.grid.major = element_line(color = "#4082c4"),
+    panel.grid.minor = element_blank()
+  )
+
+
+
+
+```
+
+
+
+
+```{r}
+
+headline_tokens_lda_eval_k$eval_results %>%
+  select(k, perplexity, coherence) %>%
+  mutate(k = as.numeric(k)) %>%
+  pivot_longer(cols = -k, names_to = 'metric', values_to = 'values') %>%
+  ggplot(aes(x = k, y = values)) +
+  geom_line(color = '#FAF9F6', linewidth = 1) +
+  geom_point(color = '#FAF9F6', size = 2) +
+  facet_wrap(metric ~ ., scales = 'free', ncol = 1, strip.position = 'right') +
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Score Value',
+    title = 'LDA Hyperparameter Evaluation Across k Body Text',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
     panel.background = element_rect(fill = '#0057B7'),
     plot.background = element_rect(fill = '#0057B7'),
     plot.title = element_text(color = '#FAF9F6'),
     axis.text = element_text(color = '#FAF9F6'),
     axis.title = element_text(color = '#FAF9F6'),
     strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    plot.caption = element_text(color = '#FAF9F6'),
     ) 
 
-
-
-# Guardian Tokens Headline Text Frequencies visualizations - top 10 words across all years
-gu_headline_tokens_viz <- gu_headline_tokens %>%
-  count(word, sort = T) %>%
-  slice_max(n = 10, order_by = n) %>%
-  mutate(word = reorder(word, n)) %>%
-  ggplot(aes(n, word)) +
-    geom_col(fill = '#FAF9F6') +
-    labs(title = 'The Guardian Headline Top 10 Words', x = 'Count', y = 'Word') +
-    scale_x_continuous(breaks = seq(0,4000, 500)) +
-    theme_excel_new() +
-    theme(
-    panel.background = element_rect(fill = '#0057B7'),
-    plot.background = element_rect(fill = '#0057B7'),
-    plot.title = element_text(color = '#FAF9F6'),
-    axis.text = element_text(color = '#FAF9F6'),
-    axis.title = element_text(color = '#FAF9F6')
-    )
-
-# Possibly remove briefing from headlines because it doesn't really match here. However. It doesn't matter that much 
-
-
-# Guardian Tokens Headline Text Frequencies visualizations - top 10 words faceted by year of war
-gu_headline_tokens_viz_yearly <- gu_headline_tokens %>%
-  count(war_year, word, sort = T) %>%
-  group_by(war_year) %>%
-  slice_max(n = 10, order_by = n) %>% 
-  ungroup() %>%
-  mutate(word = reorder_within(word, n, war_year)) %>%
-  ggplot(aes(n, word, fill = as.factor(war_year))) +
-    geom_col(show.legend = FALSE) +
-    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
-    scale_y_reordered() +
-    labs(title = 'The Guardian Headlines Top 10 Words by Year of War', x = 'Count', y = 'Word') +
-    theme_excel_new() +
-    scale_x_continuous(breaks = seq(0, 1500, 500), limits = c(0, 1500)) + 
-    theme(
-    panel.background = element_rect(fill = '#0057B7'),
-    plot.background = element_rect(fill = '#0057B7'),
-    plot.title = element_text(color = '#FAF9F6'),
-    axis.text = element_text(color = '#FAF9F6'),
-    axis.title = element_text(color = '#FAF9F6'),
-    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
-    ) 
-
-# Left briefing in even though it is a title, because it tells us something about the populatiry of the category of such articles and its popularity over the years. 
 
 ```
+
+
 
 
 
@@ -2020,5 +2347,338 @@ kp_negation_words %>%
     strip.text = element_text(color = '#FAF9F6')
     ) 
 
+
+```
+
+```{r The Guardian Tokens Frequencies Visualizations}
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words across all years
+gu_body_tokens_viz <- gu_body_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'The Guardian Body Text Top 10 Words Across All Years', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    theme(
+    # Turn the entire background blue
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+
+
+# Guardian Tokens Body Text Frequencies visualizations - top 10 words faceted by year of war
+gu_body_tokens_viz_yearly <- gu_body_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'The Guardian Body Text Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words across all years
+gu_headline_tokens_viz <- gu_headline_tokens %>%
+  count(word, sort = T) %>%
+  slice_max(n = 10, order_by = n) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+    geom_col(fill = '#FAF9F6') +
+    labs(title = 'The Guardian Headline Top 10 Words', x = 'Count', y = 'Word') +
+    scale_x_continuous(breaks = seq(0,4000, 500)) +
+    theme_excel_new() +
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6')
+    )
+
+# Possibly remove briefing from headlines because it doesn't really match here. However. It doesn't matter that much 
+
+
+# Guardian Tokens Headline Text Frequencies visualizations - top 10 words faceted by year of war
+gu_headline_tokens_viz_yearly <- gu_headline_tokens %>%
+  count(war_year, word, sort = T) %>%
+  group_by(war_year) %>%
+  slice_max(n = 10, order_by = n) %>% 
+  ungroup() %>%
+  mutate(word = reorder_within(word, n, war_year)) %>%
+  ggplot(aes(n, word, fill = as.factor(war_year))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~war_year, scales = 'free_y') + # free y scales - reordered for each facet. x scales are fixed for comparison
+    scale_y_reordered() +
+    labs(title = 'The Guardian Headlines Top 10 Words by Year of War', x = 'Count', y = 'Word') +
+    theme_excel_new() +
+    scale_x_continuous(breaks = seq(0, 1500, 500), limits = c(0, 1500)) + 
+    theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    ) 
+
+
+
+```
+
+```{r The Guardian and Kyiv Post Conversion to Document Term Matrices}
+
+# Conversion to DTM using the tidytext cast function. This is necessary for LDA topic modeling, combining both the Guardian and Kyiv Post tokens into a single DTM for each publication.
+
+total_docs <- n_distinct(c(paste0('gu_', gu_body_tokens_raw$id), 
+                           paste0('kp_', kp_body_tokens_raw$id)))
+
+                           library(dplyr)
+
+# Extracting metadata 
+doc_metadata <- bind_rows(
+    gu_body_tokens%>% 
+      select(id, pub_date) %>% 
+      mutate(id = paste0("gu_", id), source = 'The Guardian'),
+    kp_body_tokens%>% 
+      select(id, pub_date) %>% 
+      mutate(id = paste0("kp_", id), source = 'Kyiv Post')
+  ) %>%
+  distinct(id, .keep_all = TRUE) %>% # deduplicate
+  mutate(
+    date  = as.Date(pub_date),
+    year  = year(date),
+    month = floor_date(date, 'month')
+  )
+
+                    
+
+pooled_body_tokens_dtm <- bind_rows(gu_body_tokens %>% mutate(id = paste0('gu_', id)),
+                          kp_body_tokens %>% mutate(id = paste0('kp_', id))) %>%
+                          group_by(word) %>%
+                          mutate(doc_freq = n_distinct(id)) %>%
+                          ungroup() %>%
+                          filter(doc_freq >= 50) %>% # filter out words that appear in less than 50 documents - lower bound
+                          filter(doc_freq <= total_docs * 0.99) %>% # filter out words that appear in more than 90% of documents - upper bound
+  count(id, word, sort = TRUE) %>%
+  cast_dtm(id, word, n)
+
+dim(pooled_body_tokens_dtm)
+
+
+pooled_headline_tokens_dtm <- bind_rows(gu_headline_tokens %>% mutate(id = paste0('gu_', id)),
+                          kp_title_tokens %>% mutate(id = paste0('kp_', id))) %>%
+                          group_by(word) %>%
+                          mutate(word = tolower(word)) %>% # convert all words to lowercase for consistency
+                          mutate(doc_freq = n_distinct(id)) %>%
+                          ungroup() %>%
+                          filter(doc_freq >= 10) %>% # filter out words that appear in less than 10 documents                  
+  count(id, word, sort = TRUE) %>%
+  cast_dtm(id, word, n)
+
+dim(pooled_headline_tokens_dtm)
+
+
+
+
+
+```
+
+
+
+```{r LDA How many topics to choose}
+
+#Perform LDA on the preprocessed full texts with different numbers of topics
+
+
+lda_evaluate_k <- function(dtm, k_min = 2, k_max = 20, seed = 7893, terms_n = 25) {
+
+  results_lda <- list()
+  topics <- list()
+
+for (k in seq(k_min, k_max, by = 2)) { 
+
+  print(paste0('Evaluating LDA with k = ', k, ' of ', k_max))
+
+    alpha <- 1/((1:k) + sqrt(k))  # dynamically calculates alpha        
+    lda <- LDA(dtm, k = k, control = list(seed = seed, alpha = alpha))
+    
+    # perplexity, coherence, and exclusivity are calculated for each LDA model at k and stored in a data frame within the results_lda list
+    results_lda[[as.character(k)]] <- data.frame(
+      k = k,
+      perplexity = perplexity(lda),   
+      coherence = mean(topic_coherence(lda, dtm)), 
+      exclusivity = topic_exclusivity(lda))
+
+    topics[[as.character(k)]] <- data.frame(terms(lda, terms_n))
+
+} 
+
+evaluation_summary <- bind_rows(results_lda)
+return(list(
+  eval_results = evaluation_summary,
+  topics = topics
+))
+ }
+
+
+
+body_tokens_lda_eval_k <- lda_evaluate_k(pooled_body_tokens_dtm)
+headline_tokens_lda_eval_k <- lda_evaluate_k(pooled_headline_tokens_dtm, k_max = 16, terms_n = 10) # headline tokens have fewer words, so we limit the number of terms to 10 for better interpretability
+
+
+
+
+```
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggthemes)
+
+
+
+
+body_tokens_lda_eval_k$eval_results %>%
+  select(k, perplexity, coherence) %>%
+  mutate(k = as.numeric(k)) %>%
+  pivot_longer(cols = -k, names_to = 'metric', values_to = 'values') %>%
+  ggplot(aes(x = k, y = values)) +
+  geom_line(color = '#FAF9F6', linewidth = 1) +
+  geom_point(color = '#FAF9F6', size = 2) +
+  facet_wrap(metric ~ ., scales = 'free', ncol = 1, strip.position = 'right') +
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Score Value',
+    title = 'LDA Hyperparameter Evaluation Across k Body Text',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    plot.caption = element_text(color = '#FAF9F6'),
+    ) 
+
+
+
+
+headline_tokens_lda_eval_k$eval_results %>%
+  select(k, perplexity, coherence) %>%
+  mutate(k = as.numeric(k)) %>%
+  pivot_longer(cols = -k, names_to = 'metric', values_to = 'values') %>%
+  ggplot(aes(x = k, y = values)) +
+  geom_line(color = '#FAF9F6', linewidth = 1) +
+  geom_point(color = '#FAF9F6', size = 2) +
+  facet_wrap(metric ~ ., scales = 'free', ncol = 1, strip.position = 'right') +
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Score Value',
+    title = 'LDA Hyperparameter Evaluation Across k Body Text',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    strip.text = element_text(color = '#FAF9F6'), # facet wrap text color white
+    plot.caption = element_text(color = '#FAF9F6'),
+    ) 
+
+
+
+
+body_tokens_lda_eval_k$eval_results %>%
+  select(k, exclusivity) %>%
+  mutate(k = as.numeric(k)) %>%
+  ggplot(aes(x = k, y = exclusivity)) +
+  geom_point(color = '#FAF9F6', size = 2.5) +
+  
+  # Highlight K = 16 explicitly with a marker
+  geom_point(data = . %>% filter(k == 16), color = "#FFD700", size = 4) +
+  
+  scale_x_continuous(breaks = seq(2, 20, by = 2)) +
+  labs(
+    x = 'Number of Topics (k)',
+    y = 'Exclusivity Score',
+    title = 'Topic Exclusivity Across k',
+    subtitle = 'Gold point indicates candidate K = 16',
+    caption = 'Information from theguardian.com and kyivpost.com'
+  ) +
+  theme_excel_new() +
+  theme(
+    panel.background = element_rect(fill = '#0057B7'),
+    plot.background = element_rect(fill = '#0057B7'),
+    plot.title = element_text(color = '#FAF9F6'),
+    plot.subtitle = element_text(color = '#FFD700', size = 9),
+    axis.text = element_text(color = '#FAF9F6'),
+    axis.title = element_text(color = '#FAF9F6'),
+    plot.caption = element_text(color = '#FAF9F6', size = 9, hjust = 1),
+    panel.grid.major = element_line(color = "#4082c4"),
+    panel.grid.minor = element_blank()
+  )
+
+
+
+```
+
+
+
+```{r}
+doc_primary_topics <- lda_body_gamma %>% 
+  group_by(document) %>%
+  slice_max(gamma, n = 1) %>% # slices the top gamma per document, only giving the 'primary topic', that with most gamma per document
+  ungroup()
+
+doc_primary_topics
+
+
+topic_article_counts <- doc_primary_topics %>%
+  count(source, topic, name = 'article_count') %>%
+  group_by(topic) %>%
+  mutate(pct_of_topic = article_count / sum(article_count)) %>%
+  ungroup()
+
+
+topic_article_counts %>%
+  ggplot(aes(x = factor(topic), y = pct_of_topic, fill = factor(source))) +
+  geom_col(show.legend = T, position = 'dodge') +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_excel_new() +
+  labs(title = 'Representation of Topics by Source - The Guardian and Kyiv Post',
+      y = 'Gamma Percentage - Top 1 Gamma',
+      x = 'Topic',
+      subtitle = 'How Much Does Each Topic Belong to a Source?',
+      caption = 'Information from theguardian.com and kyivpost.com')
 
 ```
